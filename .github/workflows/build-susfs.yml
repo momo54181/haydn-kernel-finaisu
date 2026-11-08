@@ -1,4 +1,4 @@
-name: Build venus kernel with FinaSU (SUSFS on, preflight v2)
+name: Build haydn kernel with FinaSU (SUSFS on, preflight v2)
 
 on:
   workflow_dispatch:
@@ -153,7 +153,7 @@ jobs:
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: venus-${{ inputs.disable_preinit }}-${{ inputs.disable_susfs }}
+          key: haydn-${{ inputs.disable_preinit }}-${{ inputs.disable_susfs }}
           max-size: 2G
 
       # 快速语法门：只编 KSU 子系统，~3-5 分钟暴露编译错误，全量构建前的闸门。
@@ -165,7 +165,7 @@ jobs:
           export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
 
-          make -j$(nproc) O=out venus_defconfig
+          make -j$(nproc) O=out haydn_defconfig
           if [ "${{ inputs.disable_susfs || 'false' }}" = "true" ]; then
             ./scripts/config --file out/.config \
               --enable KPROBES --enable KSU --enable KSU_DYNAMIC_MANAGER \
@@ -215,7 +215,7 @@ jobs:
           echo "NEKO_VER=$NEKO_VER" >> $GITHUB_ENV
           echo "kernel localversion: -$NEKO_VER"
 
-          make -j$(nproc) O=out venus_defconfig
+          make -j$(nproc) O=out haydn_defconfig
 
           if [ "${{ inputs.disable_susfs || 'false' }}" = "true" ]; then
             ./scripts/config --file out/.config \
@@ -305,7 +305,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: venus-finaus-kernel
+          name: haydn-finaus-kernel
           path: artifact/*
           if-no-files-found: error
       - name: Package AnyKernel3 zip
@@ -353,7 +353,7 @@ jobs:
           cat >> anykernel.sh <<AK3EOF
           
           ui_print " ";
-          ui_print "  venus (Xiaomi 11) FinaSU kernel";
+          ui_print "  haydn (Xiaomi 11) FinaSU kernel";
           ui_print "  kernel : 5.4.302-$NEKO_VER";
           ui_print "  build  : $BUILD_STAMP UTC";
           ui_print "  clang  : $CLANG_STR";
@@ -365,8 +365,8 @@ jobs:
           AK3EOF
           
 
-          sed -i "s/^kernel.string=.*/kernel.string=venus-FinaSU 5.4.302-$NEKO_VER by cvby/" anykernel.sh
-          sed -i "s/^device.name1=.*/device.name1=venus/" anykernel.sh
+          sed -i "s/^kernel.string=.*/kernel.string=haydn-FinaSU 5.4.302-$NEKO_VER by cvby/" anykernel.sh
+          sed -i "s/^device.name1=.*/device.name1=haydn/" anykernel.sh
           sed -i "s/^device.name2=.*/device.name2=/" anykernel.sh
           sed -i "s/^device.name3=.*/device.name3=/" anykernel.sh
           sed -i "s/^device.name4=.*/device.name4=/" anykernel.sh
@@ -375,7 +375,7 @@ jobs:
           sed -i "s/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/" anykernel.sh
           sed -i '/^backup_file /d;/^replace_string /d;/^insert_line /d;/^append_file /d;/^patch_fstab /d' anykernel.sh
           chmod +x anykernel.sh
-          NAME="venus-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+          NAME="haydn-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
           zip -r9 "../${NAME}.zip" . -x "*.git*" > /dev/null
           cd ..
           ls -lh *.zip
@@ -384,10 +384,10 @@ jobs:
       - name: Publish test release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: venus-test-${{ github.run_number }}
-          name: venus FinaSU kernel test build
+          tag_name: haydn-test-${{ github.run_number }}
+          name: haydn FinaSU kernel test build
           body: |
-            venus (Xiaomi 11) FinaSU built-in - TEST BUILD
+            haydn (Xiaomi 11) FinaSU built-in - TEST BUILD
 
             NOT VERIFIED ON DEVICE. Flash at your own risk.
 
