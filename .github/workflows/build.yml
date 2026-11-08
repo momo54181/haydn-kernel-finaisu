@@ -108,7 +108,7 @@ jobs:
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
           clang --version
 
-          make -j$(nproc) O=out venus_defconfig
+          make -j$(nproc) O=out haydn_defconfig
 
           # ---- 功耗调优：input boost 关、io-is-busy 关、schedutil 走 PELT ----
           bash ../ci/scripts/sched-tune.sh "$PWD"
@@ -178,7 +178,7 @@ jobs:
           mkdir -p patch
           cp ../kernel/out/arch/arm64/boot/Image .
           sed -i "s/^kernel.string=.*/kernel.string=venus-FinaSU by cvby/" anykernel.sh
-          sed -i "s/^device.name1=.*/device.name1=venus/" anykernel.sh
+          sed -i "s/^device.name1=.*/device.name1=haydn/" anykernel.sh
           sed -i "s/^device.name2=.*/device.name2=/" anykernel.sh
           sed -i "s/^device.name3=.*/device.name3=/" anykernel.sh
           sed -i "s/^device.name4=.*/device.name4=/" anykernel.sh
@@ -187,7 +187,7 @@ jobs:
           sed -i "s/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/" anykernel.sh
           sed -i '/^backup_file /d;/^replace_string /d;/^insert_line /d;/^append_file /d;/^patch_fstab /d' anykernel.sh
           chmod +x anykernel.sh
-          NAME="venus-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+          NAME="haydn-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
           zip -r9 "../${NAME}.zip" . -x "*.git*" > /dev/null
           cd ..
           ls -lh *.zip
