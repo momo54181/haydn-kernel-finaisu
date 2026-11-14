@@ -427,6 +427,11 @@ static void security_compute_av_user_with_policy(struct selinux_policy *policy, 
     (void)policy;
     security_compute_av_user(&selinux_state, ssid, tsid, tclass, avd);
 }
+static int security_context_to_sid_live(const char *scontext, u32 scontext_len, u32 *sid)
+{
+    /* ksu54: 5.4 has no live/sidtab split; ask the live policy directly. */
+    return security_context_to_sid(&selinux_state, scontext, scontext_len, sid, GFP_KERNEL);
+}
 /* ksu54_selinux_hide_54 done */
 '''
 

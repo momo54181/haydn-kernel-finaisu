@@ -91,58 +91,20 @@ fi
 
 echo "=== [preflight] optional: disable preinit (DISABLE_PREINIT=true) ==="
 # 二分定位用：preinit 是 5.4 上最可疑的运行时路径。
-# 教训：只用 -DKSU_NO_PREINIT 不可靠——某些调用方（syscall_event_bridge.c、
-# ksud_integration.c、dispatch.c）自己 extern 声明或经 LTO 全程序分析后
-# 仍然产生外部引用，最终 vmlinux 链接报 undefined symbol。
-# 稳妥做法：提供一份真实的空实现 stub 文件，从 Kbuild 摘掉 preinit 对象。
+# 历史教训（run46/run47）：只靠 -DKSU_NO_PREINIT 或在 preflight 里摘掉
+# preinit 对象 + 补 stub，都会漏掉 Inline 后端 fs/exec.c 直调的
+# ksu_setup_preinit_file / ksu_preinit_handle_post_execveat，最终 vmlinux
+# 链接 undefined symbol。现在改为「照常编译 preinit，运行时关开关」。
 if [ "${DISABLE_PREINIT:-false}" = "true" ]; then
-  sed -i 's|^kernelsu-objs += preinit/preinit\.o$||' "$KB"
-  sed -i 's|^kernelsu-objs += preinit/blob\.o$||' "$KB"
-
-  POF="$SUDIR/extension/ksu54_preinit_off.c"
-  if [ ! -f "$POF" ]; then
-    cat > "$POF" <<'EOF'
-/*
- * ksu54_preinit_off.c - diagnostic build: preinit disabled.
- * Real definitions (not macros): every caller of the preinit interface
- * resolves against these no-ops, regardless of how it declares them.
- */
-#include <linux/types.h>
-#include <asm/ptrace.h>
-
-void ksu_preinit_init(void)
-{
-}
-
-void ksu_preinit_exit(void)
-{
-}
-
-bool ksu_preinit_handle_execve(const char __user **filename_user,
-                               const char __user *const __user *argv_user,
-                               int orig_nr, struct pt_regs *regs, long *ret)
-{
-    return false;
-}
-
-void ksu_preinit_release(void)
-{
-}
-
-bool ksu_preinit_enabled_param(void)
-{
-    return false;
-}
-EOF
-    echo "  created extension/ksu54_preinit_off.c"
-  else
-    echo "  extension/ksu54_preinit_off.c exists (skip)"
-  fi
-
-  if ! grep -q 'ksu54_preinit_off.o' "$KB"; then
-    printf '\nkernelsu-objs += extension/ksu54_preinit_off.o\n' >> "$KB"
-  fi
-  echo "  preinit objects removed + ksu54_preinit_off.o registered"
+  # Inline 后端的 fs/exec.c 会无条件直调 ksu_setup_preinit_file /
+  # ksu_preinit_handle_post_execveat。若在这里摘掉 preinit 对象再补 stub，
+  # 就必须同步维护 stub 里的全部符号（run46 就是因为 stub 少这两个而链接失败）。
+  # 现在统一交给 workflow：
+  #   - headers_install 恒执行 -> preinit.o / blob.o 正常编译，符号存在
+  #   - Build kernel 里把 preinit.c 的运行时开关默认改为 false -> init 不被换名
+  # 因此这里不再摘对象、不再生成 stub。
+  echo "  preinit: left compiled in, runtime switch disabled by workflow (no stub)"
+  echo "  preinit left disabled at runtime (workflow handled)"
 else
   echo "  preinit left enabled (default)"
 fi
@@ -505,7 +467,10 @@ chk "rules.c status_update guarded"       "grep -q 'ksu54_status_guard' '$SUDIR/
 chk "rules.c AVC reset seqno pinned"      "grep -q 'ksu54_reset_seqno' '$SUDIR/selinux/rules.c' || ! grep -q 'reset_avc_cache(pol->latest_granting)' '$SUDIR/selinux/rules.c'"
 
 if [ "${DISABLE_PREINIT:-false}" = "true" ]; then
-  chk "preinit disabled (stub + objs removed)" "grep -q 'ksu54_preinit_off.o' '$SUDIR/Kbuild' && ! grep -q 'preinit/preinit\.o' '$SUDIR/Kbuild'"
+  # 现行逻辑（bd8f1de4）：preinit 照常编译，符号必须存在（SUSFS 直调需要），
+  # 运行时开关由 workflow 的 Build kernel 步骤改成 ksu_preinit_enabled = false。
+  # 因此这里只确认没有残留的旧 stub（旧逻辑会摘对象补 ksu54_preinit_off.o）。
+  chk "preinit kept compiled (runtime switch handled by workflow)" "! grep -q 'ksu54_preinit_off' '$SUDIR/Kbuild'"
 fi
 
 if [ "${DISABLE_SUSFS:-false}" = "true" ]; then

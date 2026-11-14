@@ -6,7 +6,7 @@ on:
       ksu_ref:
         description: 'FinaSU git ref'
         required: false
-        default: 'v1.5.0'
+        default: 'v1.6.1'
       kernel_repo:
         description: 'kernel source repo (owner/name)'
         required: false
@@ -16,9 +16,9 @@ on:
         required: false
         default: 'main'
       disable_preinit:
-        description: 'Diagnostic: disable KSU preinit (bisect boot loop)'
+        description: 'Disable KSU preinit runner (compiled in, off at runtime; default on for 5.4 Inline stability)'
         required: false
-        default: false
+        default: true
         type: boolean
       disable_susfs:
         description: 'Diagnostic: disable SUSFS entirely (bisect boot loop)'
@@ -79,6 +79,13 @@ jobs:
         run: |
           chmod +x ci/scripts/susfs-version.sh
           bash ci/scripts/susfs-version.sh "$PWD/kernel"
+
+      # 让 spoof_uname 同时覆盖 /proc/version 与 /proc/sys/kernel/{osrelease,version}，
+      # 使系统「内核版本」显示与软件读取也显示伪装值（默认只 hook uname() 系统调用）。
+      - name: SUSFS uname spoof for /proc/version and osrelease
+        run: |
+          chmod +x ci/scripts/susfs-uname-proc.sh
+          bash ci/scripts/susfs-uname-proc.sh "$PWD/kernel"
 
       - name: Preflight (5.4 shim headers, Kbuild injection, devpts, umount)
         run: |
@@ -201,6 +208,22 @@ jobs:
             || make -j$(nproc) O=out drivers/kernelsu/
           echo "=== gate: PASS ==="
 
+      - name: SUSFS Inline direct-entry gate
+        run: |
+          # 官方门禁：Inline 后端要求 7 个文件都存在直调入口，缺一个就 fail，
+          # 避免出现“能编能刷但功能缺失/卡开机”的包。
+          if ! grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' \
+              "$PWD/kernel/arch/arm64/configs/venus_defconfig" 2>/dev/null; then
+            echo "not the SUSFS Inline backend, gate skipped"
+            exit 0
+          fi
+          SCRIPT="$PWD/kernel/KernelSU/kernel/tools/check_susfs_inline.sh"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::check_susfs_inline.sh missing from this FinaSU ref; refusing to build Inline without the gate"
+            exit 1
+          fi
+          bash "$SCRIPT" "$PWD/kernel"
+
       - name: Build kernel
         run: |
           cd kernel
@@ -209,6 +232,23 @@ jobs:
           export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
           clang --version
+          # disable_preinit=true：preinit 仍然编译（保证符号存在），
+          # 但把运行时开关默认置 false，init 不会被换名执行 runner。
+          # 用于二分定位 run45 的“卡第一屏”是否由 preinit runner 引起。
+          if [ "${{ inputs.disable_preinit || 'false' }}" = "true" ]; then
+            P=KernelSU/kernel/preinit/preinit.c
+            if [ -f "$P" ]; then
+              sed -i 's/^static bool ksu_preinit_enabled = true;/static bool ksu_preinit_enabled = false;/' "$P"
+              grep -n "static bool ksu_preinit_enabled" "$P"
+              if ! grep -q "ksu_preinit_enabled = false" "$P"; then
+                echo "::error::failed to patch preinit runtime default"
+                exit 1
+              fi
+            else
+              echo "::error::$P missing from this FinaSU ref"
+              exit 1
+            fi
+          fi
 
           # 内核版本后缀：5.4.302-Neko-CL-<日期>-<随机>
           NEKO_VER="Neko-CL-$(date +%Y%m%d)-$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')"
@@ -236,6 +276,17 @@ jobs:
               --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP \
               --enable KSU_DYNAMIC_MANAGER
           fi
+          # hook 后端：choice 依赖 KSU_SUSFS=y 才会在 olddefconfig 时保留，
+          # 单靠 defconfig 里的 INLINE=y 会被 choice 默认值(Tracepoint)覆盖。
+          # 因此按内核树的 defconfig 显式开关，且只在该树声明 Inline 时才动，
+          # 不污染 main 分支（main 无直调点，强开 Inline 会触发门禁失败）。
+          if grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' arch/arm64/configs/venus_defconfig; then
+            echo "hook backend: SUSFS Inline (explicit enable)"
+            ./scripts/config --file out/.config \
+              --enable KSU_HOOK_SUSFS_INLINE --disable KSU_HOOK_TRACEPOINT
+          else
+            echo "hook backend: Tracepoint (default)"
+          fi
 
           # 不要 -g<sha> 后缀，只用我们自己的 Neko-CL 版本号
           ./scripts/config --file out/.config --set-str LOCALVERSION ""
@@ -245,6 +296,25 @@ jobs:
           bash ../ci/scripts/power-tune.sh "$PWD"
           make -j$(nproc) O=out olddefconfig
           bash ../ci/scripts/power-tune.sh "$PWD" verify
+          # preinit 是否参与编译由 workflow 输入决定：
+          # - disable_preinit=false：preinit 完整生效（编译 + 运行时启用）
+          # - disable_preinit=true ：preinit 仍编译（符号必须存在），但 preinit.c 里的
+          #   运行时开关默认改为 false，init 不会被换名执行 runner（用于二分定位）
+          # Inline 后端的 fs/exec.c 无条件直调 ksu_setup_preinit_file /
+          # ksu_preinit_handle_post_execveat；缺 out/usr/include 时 preinit.o 不编译，
+          # 这两个符号就不存在 -> ld.lld undefined symbol（run46 即此失败）。
+          # 所以 headers_install 必须始终执行。
+          PREINIT_ARG="KSU_REQUIRE_PREINIT=1"
+          make -j$(nproc) O=out headers_install
+          if [ -d out/usr/include ]; then
+            echo "preinit headers: out/usr/include OK ($(ls out/usr/include | wc -l) entries)"
+          else
+            echo "::error::headers_install did not produce out/usr/include; preinit symbol would be missing"
+            exit 1
+          fi
+          if [ "${{ inputs.disable_preinit || 'false' }}" = "true" ]; then
+            echo "preinit: compiled in, disabled at RUNTIME (preinit.c default=false)"
+          fi
 
           # 与门禁同理：先确保 flask.h 已生成，避免与 selinux 目录构建竞态
           make -j$(nproc) O=out security/selinux/flask.h \
@@ -284,14 +354,47 @@ jobs:
             exit 1
           fi
           echo "KSU/SUSFS config gate: PASS"
+          # 官网口径：以编译器真正读取的 out/include/config/auto.conf 为准，
+          # 而不是只看 out/.config（olddefconfig 之后再解析可能产生差异）。
+          if [ -f out/include/config/auto.conf ]; then
+            for sym in CONFIG_KSU CONFIG_KPROBES CONFIG_EXT4_FS; do
+              if ! grep -qx "$sym=y" out/include/config/auto.conf; then
+                echo "::error::$sym=y missing from auto.conf"
+                exit 1
+              fi
+            done
+            if ! grep -qx "CONFIG_HEADERS_INSTALL=y" out/include/config/auto.conf; then
+              echo "::error::CONFIG_HEADERS_INSTALL=y missing from auto.conf (Inline exec.c needs preinit symbols)"
+              exit 1
+            fi
+            echo "auto.conf config gate: PASS"
+          else
+            echo "::warning::out/include/config/auto.conf not found, auto.conf gate skipped"
+          fi
 
           # D1 修补：不传 KSU_SECOND_SIGNATURE_RELEASE=1 时，
           # FINASU_TRUSTED_* 回落到 slot1（KSU 官方签名），slot2 白注入。
+          set -o pipefail
           make -j$(nproc) O=out LOCALVERSION="-$NEKO_VER" \
+            $PREINIT_ARG \
             KSU_SECOND_SIGNATURE_RELEASE=1 \
             KSU_EXPECTED_SIZE2=716 \
             KSU_EXPECTED_HASH2=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458 \
-            Image Image.gz dtbs
+            Image Image.gz dtbs 2>&1 | tee /tmp/build.log
+          # 官网口径：确认构建日志打印的 manager signature(slot2) 与要安装的管理器一致
+          echo "=== manager signature slots (from build log) ==="
+          grep -E 'KernelSU Manager signature' /tmp/build.log | tail -4 || true
+          if [ "${{ inputs.disable_susfs || 'false' }}" != "true" ]; then
+            if ! grep -q 'KernelSU Manager signature size2: 716' /tmp/build.log; then
+              echo "::error::slot2 size 716 not found in build log; KSU_EXPECTED_SIZE2 not applied"
+              exit 1
+            fi
+            if ! grep -q 'KernelSU Manager signature hash2: 2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458' /tmp/build.log; then
+              echo "::error::slot2 hash mismatch in build log"
+              exit 1
+            fi
+            echo "signature slot2 gate: PASS"
+          fi
 
       - name: Collect artifacts
         run: |
@@ -323,7 +426,7 @@ jobs:
           echo "EMBED_KSUD=$EMBED_KSUD"
           echo "KSUD_EMBED=$EMBED_KSUD" >> $GITHUB_ENV
           if [ "$EMBED_KSUD" = "true" ]; then
-            KSAPK_URL="https://github.com/LyraVoid/FinaSU/releases/download/v1.5.0/FinaSU_v1.5.0_33174-release.apk"
+            KSAPK_URL="https://github.com/LyraVoid/FinaSU/releases/download/v1.6.1/FinaSU_v1.6.1_33198-release.apk"
             if curl -fL --retry 3 --connect-timeout 20 -o /tmp/fina.apk "$KSAPK_URL"; then
               if unzip -o -j /tmp/fina.apk "lib/arm64-v8a/libksud.so" -d /tmp/kx > /dev/null; then
                 cp /tmp/kx/libksud.so ./ksud
@@ -396,6 +499,7 @@ jobs:
             - preflight v2: 5.4 shim headers + global -include + devpts/umount retarget
             - Package: AnyKernel3 zip
             - ksud embedded: ${{ env.KSUD_EMBED || 'false' }}
+            ${{ inputs.disable_preinit == true && '- preinit: DISABLED - initrc/*.rc, preinit/ and some early sync will NOT work (official doc)' || '- preinit: enabled (KSU_REQUIRE_PREINIT=1)' }}
 
             Install: flash in TWRP or a kernel flasher app.
             Manager: FinaSU manager matching the slot2 signature.

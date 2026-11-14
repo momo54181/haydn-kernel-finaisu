@@ -25,7 +25,7 @@
 
 ## 快速开始
 
-1. 到 **[Releases](../../releases)** 下载 **[`ak3-susfs-2`](https://github.com/cvbyisme/venus-kernel-finaisu/releases/tag/ak3-susfs-2)**（最新稳定包，SELinux 隐藏双层修复 + 春秋探测通过）或最新的 `venus-test-*`
+1. 到 **[Releases](../../releases)** 下载 **[`ak3-susfs-8`](https://github.com/cvbyisme/venus-kernel-finaisu/releases/tag/ak3-susfs-8)**（最新稳定包：FinaSU v1.6.1 + **SUSFS Inline** + preinit runner 运行时关闭）或最新的 `venus-test-*`
 2. 进 **TWRP** 刷入或者APP刷入
 3. 重启，打开 FinaSU —— 首屏显示 **「工作中」** 即完成
 
@@ -111,9 +111,9 @@ ccflags-y += -include $(srctree)/include/linux/ksu54_compat.h
 
 本树**自带** SUSFS v2.1.0（源码在 `fs/susfs.c` 等，不从上游下载），`scripts/susfs-setup.sh` 负责把它接进 FinaSU 与 5.4 内核。
 
-FinaSU v1.4.2 的 ksud 要求内核 SUSFS 版本字符串**精确等于 `v2.3.0`**，否则判定 `unknown_protocol`，管理器 SUSFS 页只读、全功能不可用。v2.1.0 与 v2.3.0 的用户态协议完全兼容（23 个 `CMD_SUSFS_*` 编号逐一相同、`st_susfs_*` wire 结构布局一致，差异只在内核内部实现）。因此 `scripts/susfs-version.sh` 让内核如实汇报 `v2.3.0`，并顺手修掉 v2.1.0 的 `KSTAT_SPOOF_CTIME_TV_SEC (1 < 8)` 笔误（应为 `(1 << 8)`）。
+FinaSU v1.4.2 的 ksud 要求内核 SUSFS 版本字符串**精确等于 `v2.3.0`**，否则判定 `unknown_protocol`，管理器 SUSFS 页只读、全功能不可用。FinaSU v1.6.1 的 ksud 接受 `v2.3.0` 与 `v2.4.0`（v2.4.0 需要内核 SELinux hide 重构契约，本树暂未升级，保持 v2.3.0）。v2.1.0 与 v2.3.0 的用户态协议完全兼容（23 个 `CMD_SUSFS_*` 编号逐一相同、`st_susfs_*` wire 结构布局一致，差异只在内核内部实现）。因此 `scripts/susfs-version.sh` 让内核如实汇报 `v2.3.0`，并顺手修掉 v2.1.0 的 `KSTAT_SPOOF_CTIME_TV_SEC (1 < 8)` 笔误（应为 `(1 << 8)`）。
 
-钩子后端采用 **Tracepoint**：FinaSU 的 `SUSFS Inline` 后端在 5.4 上会导致内核 panic（init exec 路径，连 recovery 也无法进入），已实机复现，故不采用。
+钩子后端：**SUSFS Inline**（ak3-susfs-8 起默认，详见第七节）。早期结论「Inline 在 5.4 上 panic、不采用」已修正 —— 实际卡屏来自 **preinit runner** 在 5.4 的 pid1 exec 路径（run45 实测，无 pstore），与 Inline 直调本体无关；保留 preinit 编译（Inline 直调符号必须存在）但把运行时开关关掉（`ksu_preinit_enabled=false`）后，Inline 在 5.4 上稳定可用。Tracepoint 仍保留为构建可选。
 
 > 历史现象：早期版本 SUSFS 一直报「未知协议」，dmesg 里 `show_version` / `show_variant` / `get_enabled_features` 均 `ret:0`（内核能响应 ioctl），最终定位为版本字符串不一致 —— 已由 `susfs-version.sh` 彻底解决，不是集成方式问题。
 
@@ -194,6 +194,22 @@ FinaSU v1.4.2 的 ksud 要求内核 SUSFS 版本字符串**精确等于 `v2.3.0`
 
 > 早期在 `power-wip` 分支上试验的 `WQ_POWER_EFFICIENT_DEFAULT` / `SCHED_DEBUG` / `PROFILING` 未纳入正式版：`SCHED_DEBUG` 在最终配置里本就由依赖关系决定（无收益），另两项收益小、且与卡屏问题无关，故不启用。
 
+### 七、SUSFS Inline 后端（ak3-susfs-8 起默认）
+
+**切换**：内核树 `main` 已将 `CONFIG_KSU_HOOK_SUSFS_INLINE=y` 的 Inline 直调（`fs/exec.c`、`fs/open.c`、`fs/stat.c` 等，`check_susfs_inline.sh` 门禁通过）合入，构建默认走 Inline 后端。
+
+**preinit runner 运行时关闭**：
+
+| 项 | 说明 |
+|---|---|
+| preinit 编译 | 保留（Inline 直调的 `ksu_setup_preinit_file` / `ksu_preinit_handle_post_execveat` 符号必须存在，缺了会 vmlinux 链接失败） |
+| 运行时开关 | `ksu_preinit_enabled = false`（workflow 默认 `disable_preinit=true`） |
+| 为什么关 | 5.4 上 preinit runner 会卡第一屏（run45 实测，无 pstore）；关闭后与 SukiSU 5.4 的做法一致 |
+| 代价 | 失去「init.rc 解析前的早期注入」（极少模块依赖）；普通模块（post-fs-data overlayfs）与 root 不受影响 |
+
+**已知限制**：app 侧 `System.getProperty("os.version")` 由 zygote 启动时缓存，若 SUSFS uname 在 zygote 之后应用，app 仍可能读到真实值（Hunter 等严格检测器可能仍报 `uname spoofing`）。
+
+
 ---
 
 ## 构建
@@ -218,6 +234,7 @@ FinaSU v1.4.2 的 ksud 要求内核 SUSFS 版本字符串**精确等于 `v2.3.0`
 | `scripts/ksu54-compat.h` | 兼容头本体（被 `-include` 全局注入） |
 | `scripts/susfs-setup.sh` | SUSFS 5.4 移植（接进 FinaSU 与内核树） |
 | `scripts/susfs-version.sh` | SUSFS 版本对齐（v2.1.0 内核如实汇报 v2.3.0 协议，修 ctime 笔误） |
+| `scripts/susfs-uname-proc.sh` | uname procfs 伪装：`/proc/version` 与 `/proc/sys/kernel/{osrelease,version}` 接到 SUSFS uname 缓冲，与 `uname(2)` 保持一致 |
 | `scripts/power-tune.sh` | 默认 governor 改 `schedutil`（含 verify 模式） |
 | `scripts/sched-tune.sh` | 应用 `scripts/sched-patches/*.patch`（幂等 + `git apply --check`） |
 | `scripts/sched-patches/` | `pelt-force` / `s1-input-boost-off` / `s2-io-is-busy-off` 三个补丁 |
@@ -270,7 +287,10 @@ su -c 'sh /sdcard/Download/venus-selftest.sh'
 
 | Tag | 内容 |
 |---|---|
-| **[`ak3-susfs-5`](https://github.com/cvbyisme/venus-kernel-finaisu/releases/tag/ak3-susfs-5)** | **当前稳定版**：FinaSU v1.5.0（保留两个内核 SELinux 提交）+ 5.4 AVC seqno 兼容补丁 + **默认内嵌匹配版本 ksud**（TWRP 刷入直接覆盖旧版，模块首次开机即正常）；空载亮屏约 1.3W（2026-11-08 实机验证） |
+| **[`ak3-susfs-8`](https://github.com/cvbyisme/venus-kernel-finaisu/releases/tag/ak3-susfs-8)** | **当前稳定版**：SUSFS **Inline 后端**正式化（内核树 `1c9bda194`，fs/exec.c 等直调 + 官方门禁通过）+ preinit runner 运行时关闭（5.4 稳定，对齐 SukiSU 做法）；管理器沿用 ak3-susfs-7 的 v1.6.1 APK |
+| `ak3-susfs-7` | FinaSU v1.6.1 + SUSFS **Tracepoint** 后端（2026-11-13，含 `FinaSU_v1.6.1_33198-release.apk` 管理器 + run43 内核） |
+| `ak3-susfs-6` | FinaSU v1.5.0 + uname procfs 伪装（`/proc/version`、osrelease、version 与 `uname(2)` 一致） |：ak3-susfs-5 + uname procfs 伪装（`/proc/version`、`/proc/sys/kernel/{osrelease,version}` 与 `uname(2)` 一致；app 侧 zygote 缓存限制见第六节） |
+| `ak3-susfs-5` | FinaSU v1.5.0 基线稳定版（无 uname procfs 伪装）：FinaSU v1.5.0（保留两个内核 SELinux 提交）+ 5.4 AVC seqno 兼容补丁 + **默认内嵌匹配版本 ksud**（TWRP 刷入直接覆盖旧版，模块首次开机即正常）；空载亮屏约 1.3W（2026-11-08 实机验证） |
 | `ak3-susfs-4` | 上一稳定版：同内核，但默认不内嵌 ksud（刷入删除旧版，首次开机模块会失效、需重启两次恢复） |
 | `ak3-susfs-2` | FinaSU + SUSFS v2.3.0 + SELinux 隐藏双层修复，春秋 native 4.6.2 探测通过（2026-11-07） |
 | `ak3-susfs-1` | 更早稳定版（2026-11-04）。SELinux 隐藏实际未生效（构建脚本在 step7 中断） |
