@@ -1,4 +1,4 @@
-name: Build venus kernel with FinaSU (SUSFS on, preflight v2)
+name: Build haydn kernel with FinaSU (SUSFS on, preflight v2)
 
 on:
   workflow_dispatch:
@@ -71,7 +71,7 @@ jobs:
           # untrusted_app/app_data_file）被 SELinux 拒成 EACCES。
           # 这里改成 basename=="su" 匹配 + 内核侧 filp_open/fd_install +
           # AT_EMPTY_PATH 执行，与 syscall-hook 版 sucompat 等价。
-          if grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' kernel/arch/arm64/configs/venus_defconfig; then
+          if grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' kernel/arch/arm64/configs/haydn_defconfig; then
             python3 ci/scripts/patch_fsu_inline_sucompat.py kernel/KernelSU/kernel/extension/susfs.c
           else
             echo "not the SUSFS Inline backend, sucompat patch skipped"
@@ -174,7 +174,7 @@ jobs:
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: venus-${{ inputs.disable_preinit }}-${{ inputs.disable_susfs }}
+          key: haydn-${{ inputs.disable_preinit }}-${{ inputs.disable_susfs }}
           max-size: 2G
 
       # 快速语法门：只编 KSU 子系统，~3-5 分钟暴露编译错误，全量构建前的闸门。
@@ -186,7 +186,7 @@ jobs:
           export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
 
-          make -j$(nproc) O=out venus_defconfig
+          make -j$(nproc) O=out haydn_defconfig
           if [ "${{ inputs.disable_susfs || 'false' }}" = "true" ]; then
             ./scripts/config --file out/.config \
               --enable KPROBES --enable KSU --enable KSU_DYNAMIC_MANAGER \
@@ -227,7 +227,7 @@ jobs:
           # 官方门禁：Inline 后端要求 7 个文件都存在直调入口，缺一个就 fail，
           # 避免出现“能编能刷但功能缺失/卡开机”的包。
           if ! grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' \
-              "$PWD/kernel/arch/arm64/configs/venus_defconfig" 2>/dev/null; then
+              "$PWD/kernel/arch/arm64/configs/haydn_defconfig" 2>/dev/null; then
             echo "not the SUSFS Inline backend, gate skipped"
             exit 0
           fi
@@ -269,7 +269,7 @@ jobs:
           echo "NEKO_VER=$NEKO_VER" >> $GITHUB_ENV
           echo "kernel localversion: -$NEKO_VER"
 
-          make -j$(nproc) O=out venus_defconfig
+          make -j$(nproc) O=out haydn_defconfig
 
           if [ "${{ inputs.disable_susfs || 'false' }}" = "true" ]; then
             ./scripts/config --file out/.config \
@@ -294,7 +294,7 @@ jobs:
           # 单靠 defconfig 里的 INLINE=y 会被 choice 默认值(Tracepoint)覆盖。
           # 因此按内核树的 defconfig 显式开关，且只在该树声明 Inline 时才动，
           # 不污染 main 分支（main 无直调点，强开 Inline 会触发门禁失败）。
-          if grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' arch/arm64/configs/venus_defconfig; then
+          if grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' arch/arm64/configs/haydn_defconfig; then
             echo "hook backend: SUSFS Inline (explicit enable)"
             ./scripts/config --file out/.config \
               --enable KSU_HOOK_SUSFS_INLINE --disable KSU_HOOK_TRACEPOINT
@@ -422,7 +422,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: venus-finaus-kernel
+          name: haydn-finaus-kernel
           path: artifact/*
           if-no-files-found: error
       - name: Package AnyKernel3 zip
@@ -472,7 +472,7 @@ jobs:
           cat >> anykernel.sh <<AK3EOF
           
           ui_print " ";
-          ui_print "  venus (Xiaomi 11) FinaSU kernel";
+          ui_print "  haydn (Xiaomi 11) FinaSU kernel";
           ui_print "  kernel : 5.4.302-$NEKO_VER";
           ui_print "  build  : $BUILD_STAMP UTC";
           ui_print "  clang  : $CLANG_STR";
@@ -484,8 +484,8 @@ jobs:
           AK3EOF
           
 
-          sed -i "s/^kernel.string=.*/kernel.string=venus-FinaSU 5.4.302-$NEKO_VER by cvby/" anykernel.sh
-          sed -i "s/^device.name1=.*/device.name1=venus/" anykernel.sh
+          sed -i "s/^kernel.string=.*/kernel.string=haydn-FinaSU 5.4.302-$NEKO_VER by cvby/" anykernel.sh
+          sed -i "s/^device.name1=.*/device.name1=haydn/" anykernel.sh
           sed -i "s/^device.name2=.*/device.name2=/" anykernel.sh
           sed -i "s/^device.name3=.*/device.name3=/" anykernel.sh
           sed -i "s/^device.name4=.*/device.name4=/" anykernel.sh
@@ -494,7 +494,7 @@ jobs:
           sed -i "s/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/" anykernel.sh
           sed -i '/^backup_file /d;/^replace_string /d;/^insert_line /d;/^append_file /d;/^patch_fstab /d' anykernel.sh
           chmod +x anykernel.sh
-          NAME="venus-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+          NAME="haydn-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
           zip -r9 "../${NAME}.zip" . -x "*.git*" > /dev/null
           cd ..
           ls -lh *.zip
@@ -503,10 +503,10 @@ jobs:
       - name: Publish test release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: venus-test-${{ github.run_number }}
-          name: venus FinaSU kernel test build
+          tag_name: haydn-test-${{ github.run_number }}
+          name: haydn FinaSU kernel test build
           body: |
-            venus (Xiaomi 11) FinaSU built-in - TEST BUILD
+            haydn (Xiaomi 11) FinaSU built-in - TEST BUILD
 
             NOT VERIFIED ON DEVICE. Flash at your own risk.
 
