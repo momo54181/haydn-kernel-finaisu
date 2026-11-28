@@ -1,0 +1,131 @@
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index 826d640..09dad1b 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -16,9 +16,42 @@
+ #include <trace/hooks/sched.h>
+ 
+ #include <linux/hwui_mon.h>
++#include <linux/module.h>
+ 
+ #define IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
+ 
++/*
++ * QTI cpufreq-hw reports cpuinfo.transition_latency == 0 and leaves
++ * policy->transition_delay_us unset, so cpufreq_policy_transition_delay_us()
++ * returns 0 and schedutil ends up with no up/down rate limiting at all.
++ * On top of that /vendor/bin/init.qcom.post_boot.sh writes 0 into
++ * up_rate_limit_us/down_rate_limit_us after boot, so a value only applied at
++ * init time gets overwritten anyway.
++ *
++ * Therefore the floors below are enforced on every decision instead of just
++ * at init. All knobs are writable at runtime through
++ * /sys/module/cpufreq_schedutil/parameters/.
++ */
++static unsigned int sugov_up_rate_limit_floor_us __read_mostly = 2000;
++module_param_named(up_rate_limit_floor_us, sugov_up_rate_limit_floor_us, uint, 0644);
++MODULE_PARM_DESC(up_rate_limit_floor_us, "Minimum schedutil up rate limit in us");
++
++static unsigned int sugov_down_rate_limit_floor_us __read_mostly = 50000;
++module_param_named(down_rate_limit_floor_us, sugov_down_rate_limit_floor_us, uint, 0644);
++MODULE_PARM_DESC(down_rate_limit_floor_us, "Minimum schedutil down rate limit in us");
++
++static unsigned int sugov_cap_little_khz __read_mostly = 1600000;
++module_param_named(cap_little_khz, sugov_cap_little_khz, uint, 0644);
++MODULE_PARM_DESC(cap_little_khz, "schedutil request cap for cpu0-3 in kHz (0 = no cap)");
++
++static unsigned int sugov_cap_big_khz __read_mostly = 1900000;
++module_param_named(cap_big_khz, sugov_cap_big_khz, uint, 0644);
++MODULE_PARM_DESC(cap_big_khz, "schedutil request cap for cpu4-6 in kHz (0 = no cap)");
++
++static unsigned int sugov_cap_prime_khz __read_mostly = 2000000;
++module_param_named(cap_prime_khz, sugov_cap_prime_khz, uint, 0644);
++MODULE_PARM_DESC(cap_prime_khz, "schedutil request cap for cpu7 in kHz (0 = no cap)");
++
+ #ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+ /* Target load. Lower values result in higher CPU speeds. */
+ #define DEFAULT_TARGET_LOAD 80
+@@ -163,15 +196,26 @@ static bool sugov_up_down_rate_limit(struct sugov_policy *sg_policy, u64 time,
+ 				     unsigned int next_freq)
+ {
+ 	s64 delta_ns;
++	s64 up_ns;
++	s64 down_ns;
+ 
+ 	delta_ns = time - sg_policy->last_freq_update_time;
+ 
++	/*
++	 * vendor post-boot scripts choke these to 0 through sysfs, so take the
++	 * floor into account here (not only at init) to keep transitions spaced.
++	 */
++	up_ns = max_t(s64, sg_policy->up_rate_delay_ns,
++		      (s64)sugov_up_rate_limit_floor_us * NSEC_PER_USEC);
++	down_ns = max_t(s64, sg_policy->down_rate_delay_ns,
++			(s64)sugov_down_rate_limit_floor_us * NSEC_PER_USEC);
++
+ 	if (next_freq > sg_policy->next_freq &&
+-	    delta_ns < sg_policy->up_rate_delay_ns)
++	    delta_ns < up_ns)
+ 			return true;
+ 
+ 	if (next_freq < sg_policy->next_freq &&
+-	    delta_ns < sg_policy->down_rate_delay_ns)
++	    delta_ns < down_ns)
+ 			return true;
+ 
+ 	return false;
+@@ -199,6 +243,24 @@ static bool sugov_update_next_freq(struct sugov_policy *sg_policy, u64 time,
+ 				   unsigned int next_freq,
+ 				   unsigned int raw_freq)
+ {
++	unsigned int cap_khz = 0;
++
++	switch (sg_policy->policy->cpu) {
++	case 0:
++		cap_khz = sugov_cap_little_khz;
++		break;
++	case 4:
++		cap_khz = sugov_cap_big_khz;
++		break;
++	case 7:
++		cap_khz = sugov_cap_prime_khz;
++		break;
++	default:
++		break;
++	}
++	if (cap_khz && next_freq > cap_khz)
++		next_freq = cap_khz;
++
+ 	if (sg_policy->next_freq == next_freq)
+ 		return false;
+ 
+@@ -1572,8 +1634,10 @@ static int sugov_init(struct cpufreq_policy *policy)
+ 		goto stop_kthread;
+ 	}
+ 
+-	tunables->up_rate_limit_us = cpufreq_policy_transition_delay_us(policy);
+-	tunables->down_rate_limit_us = cpufreq_policy_transition_delay_us(policy);
++	tunables->up_rate_limit_us = max_t(unsigned int,
++		cpufreq_policy_transition_delay_us(policy), sugov_up_rate_limit_floor_us);
++	tunables->down_rate_limit_us = max_t(unsigned int,
++		cpufreq_policy_transition_delay_us(policy), sugov_down_rate_limit_floor_us);
+ 	tunables->hispeed_load = DEFAULT_HISPEED_LOAD;
+ 	tunables->hispeed_freq = 0;
+ #ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+@@ -1679,10 +1743,12 @@ static int sugov_start(struct cpufreq_policy *policy)
+ 	struct sugov_policy *sg_policy = policy->governor_data;
+ 	unsigned int cpu;
+ 
+-	sg_policy->up_rate_delay_ns =
+-		sg_policy->tunables->up_rate_limit_us * NSEC_PER_USEC;
+-	sg_policy->down_rate_delay_ns =
+-		sg_policy->tunables->down_rate_limit_us * NSEC_PER_USEC;
++	sg_policy->up_rate_delay_ns = max_t(s64,
++		(s64)sg_policy->tunables->up_rate_limit_us * NSEC_PER_USEC,
++		(s64)sugov_up_rate_limit_floor_us * NSEC_PER_USEC);
++	sg_policy->down_rate_delay_ns = max_t(s64,
++		(s64)sg_policy->tunables->down_rate_limit_us * NSEC_PER_USEC,
++		(s64)sugov_down_rate_limit_floor_us * NSEC_PER_USEC);
+ 	update_min_rate_limit_ns(sg_policy);
+ 	sg_policy->last_freq_update_time	= 0;
+ 	sg_policy->next_freq			= 0;

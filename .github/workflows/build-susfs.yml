@@ -6,13 +6,13 @@ on:
       ksu_ref:
         description: 'FinaSU git ref'
         required: false
-        default: 'v1.6.4'
+        default: 'v1.7.0'
       kernel_repo:
         description: 'kernel source repo (owner/name)'
         required: false
         default: 'C-L-Org/android_kernel_xiaomi_sm8350_miyume'
       kernel_ref:
-        description: 'kernel source ref (tracepoint = stable backend; inline-hooks = INLINE experiment)'
+        description: 'kernel source ref (tracepoint = ONLY supported backend; inline-* branches are archived experiments, do not use for release)'
         required: false
         default: 'tracepoint'
       disable_preinit:
@@ -442,7 +442,8 @@ jobs:
           if [ "$EMBED_KSUD" = "true" ]; then
             # APK 与 ksu_ref 需同步：FinaSU release asset 命名固定为
             # FinaSU_<tag>_<build>-release.apk，升级 ksu_ref 时这里也要改。
-            KSAPK_URL="https://github.com/LyraVoid/FinaSU/releases/download/v1.6.2/FinaSU_v1.6.2_33203-release.apk"
+            # v1.7.0 manager signature (v2 cert DER) 已核对：size 716 / hash 2d89b50a…，与下方 make 参数一致。
+            KSAPK_URL="https://github.com/LyraVoid/FinaSU/releases/download/v1.7.0/FinaSU_v1.7.0_33224-release.apk"
             if curl -fL --retry 3 --connect-timeout 20 -o /tmp/fina.apk "$KSAPK_URL"; then
               if unzip -o -j /tmp/fina.apk "lib/arm64-v8a/libksud.so" -d /tmp/kx > /dev/null; then
                 cp /tmp/kx/libksud.so ./ksud

@@ -25,7 +25,7 @@
 
 ## 快速开始
 
-1. 到 **[Releases](../../releases)** 下载 **[`ak3-susfs-10`](https://github.com/C-L-Org/venus-kernel-finaisu/releases/tag/ak3-susfs-10)**（最新稳定包：**Tracepoint 后端** + FinaSU v1.6.4 + uname procfs 伪装）或最新的 `venus-test-*`
+1. 到 **[Releases](../../releases)** 下载 **[`ak3-susfs-13`](https://github.com/C-L-Org/venus-kernel-finaisu/releases/tag/ak3-susfs-13)**（最新稳定包：**Tracepoint 后端** + FinaSU v1.7.0 + uname procfs 伪装 + **频率抖动修复（强制限速）**）或最新的 `venus-test-*`
 2. 进 **TWRP** 刷入或者APP刷入
 3. 重启，打开 FinaSU —— 首屏显示 **「工作中」** 即完成
 
@@ -187,8 +187,13 @@ FinaSU v1.4.2 的 ksud 要求内核 SUSFS 版本字符串**精确等于 `v2.3.0`
 | PELT 修复 | `scripts/sched-patches/pelt-force.patch` | schedutil 强制 PELT util 路径（**必需**，否则卡 logo） |
 | 输入提升 | `scripts/sched-patches/s1-input-boost-off.patch` | `cpu-boost` 输入提升主开关默认关：触摸不再拉高 min 频；运行时 `echo 1 > /sys/devices/system/cpu/cpu_boost/input_boost` 可恢复 |
 | IO 推频 | `scripts/sched-patches/s2-io-is-busy-off.patch` | WALT `io_is_busy` 默认 0：IO 等待不再推高频 |
+| 频率抖动 | `scripts/sched-patches/s4-sugov-damping.patch` | QTI `transition_latency=0` 让 schedutil 的 up/down rate limit 全为 0，**且 `/vendor/bin/init.qcom.post_boot.sh` 每次开机把它写回 0**。补丁在 `sugov_up_down_rate_limit()` 里按 `max(当前值, floor)` 强制 up 2ms / down 50ms，另给三簇请求上限 1.6/1.9/2.0GHz；全部可在 `/sys/module/cpufreq_schedutil/parameters/` 运行时调整，上限写 `0` 解除 |
 
 补丁由 `scripts/sched-tune.sh` 在 CI 克隆内核后应用，带幂等与 `git apply --check` 门禁；内核树漂移时显式失败，不静默跳过。三条构建线（`build-susfs.yml` / `build.yml` / `pure.yml`）均已接入，**workflow 默认即省电形态**，无需额外勾选。
+
+> **频率抖动根因（2026-11-25 实机定位）**：`cpuinfo.transition_latency = 0` → `cpufreq_policy_transition_delay_us()` 返回 0 → `sugov_init()` 把 `up_rate_limit_us`/`down_rate_limit_us` 都设成 0，等价于不限速，于是各簇在最低/最高 OPP 间来回锯齿（14 秒内小核变 24 次、超大核变 29 次）。run63 曾把 `DEFAULT_CPU0_RTG_BOOST_FREQ` 置 0，实测**放大**波动（失去 1GHz 托底），已撤销。
+>
+> **第二层根因（2026-11-25 二次定位）**：仅改 init 默认值无效 —— `/vendor/bin/init.qcom.post_boot.sh` 第 36/37 行会把 `up_rate_limit_us`/`down_rate_limit_us` 直接写回 0（第 43 行还会把 `rtg_boost_freq` 写 0）。因此 ak3-susfs-13 起改为在 `sugov_up_down_rate_limit()` 内按 `max(当前值, floor)` 强制，实测跳变次数 24/29 → 1/5（36 次 × 0.4s 采样）。
 
 > **第二个坑（2026-11-07 实机定位）**：管理器升级 v1.5.0 后，若设备上仍是旧版 ksud（v1.4.2），空载亮屏功耗 2.65W；换成匹配的 v1.5.0 ksud（或彻底删掉 ksud）后回到 1.32W。根因不是内核调度，而是管理器与旧 ksud 后台握手重试。因此 AK3 加了「不内嵌时自动清理旧 ksud」逻辑，见第二节。
 
@@ -232,7 +237,7 @@ ak3-susfs-8 曾把 `CONFIG_KSU_HOOK_SUSFS_INLINE=y` 的 Inline 直调（`fs/exec
 | `scripts/susfs-uname-proc.sh` | uname procfs 伪装：`/proc/version` 与 `/proc/sys/kernel/{osrelease,version}` 接到 SUSFS uname 缓冲，与 `uname(2)` 保持一致 |
 | `scripts/power-tune.sh` | 默认 governor 改 `schedutil`（含 verify 模式） |
 | `scripts/sched-tune.sh` | 应用 `scripts/sched-patches/*.patch`（幂等 + `git apply --check`） |
-| `scripts/sched-patches/` | `pelt-force` / `s1-input-boost-off` / `s2-io-is-busy-off` 三个补丁 |
+| `scripts/sched-patches/` | `pelt-force` / `s1-input-boost-off` / `s2-io-is-busy-off` / `s4-sugov-damping` 四个补丁 |
 | `scripts/venus-selftest.sh` | **刷完自检**：内核身份 / KSU feature / SELinux 域 / governor / zram / 电池 / 补丁日期 / 模块 / dmesg 异常扫描 / boot 备份，输出 PASS-WARN-FAIL 表 |
 | `scripts/collect-logs.sh` | 一键收集日志打包 zip，给别人排错用（dmesg、logcat、pstore、ksud.log 全带） |
 | `scripts/ak3-ksud.sh` | AK3 ksud 处理：内嵌时装/覆盖，不内嵌时删除设备旧版（防版本不匹配耗电） |
@@ -282,7 +287,10 @@ su -c 'sh /sdcard/Download/venus-selftest.sh'
 
 | Tag | 内容 |
 |---|---|
-| **[`ak3-susfs-10`](https://github.com/C-L-Org/venus-kernel-finaisu/releases/tag/ak3-susfs-10)** | **当前稳定版**：**Tracepoint 后端**（su 正常）+ FinaSU **v1.6.4** + uname procfs 伪装；基于 run60（内核 `a0c722931` + FinaSU `ff0e34f`）。v1.6.4 新增 SUSFS 优先级 UID 过滤（需 `CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER`，本树未开启，ksud 自动跳过不影响其余功能）、内核符号精确查找 bugfix、管理器界面刷新 |
+| **[`ak3-susfs-13`](https://github.com/C-L-Org/venus-kernel-finaisu/releases/tag/ak3-susfs-13)** | **当前稳定版**：**Tracepoint 后端** + FinaSU **v1.7.0** + uname procfs 伪装 + **频率抖动修复（v3）**；基于 run65（内核 `a0c722931` + FinaSU `a85c03a`，30,092,617 B，md5 `bb0f917be8191cc7cbf8f314ad12fe97`）。限速改为**每次调频决策强制生效**（绕过 `/vendor/bin/init.qcom.post_boot.sh` 把 `up/down_rate_limit_us` 写回 0）；实测跳变 24/29 次 → 1/5 次 |
+| `ak3-susfs-12` | FinaSU v1.7.0 + Tracepoint + 频率抖动修复 v2（基于 run64）：限速只在 init 设置，被厂商脚本覆盖，**建议升级到 13** |
+| `ak3-susfs-11` | FinaSU v1.7.0 + Tracepoint 后端（2026-11-22，基于 run62，含管理器 APK） |
+| `ak3-susfs-10` | FinaSU v1.6.4 + Tracepoint 后端（2026-11-18，基于 run60）：内核 `a0c722931` + FinaSU `ff0e34f`。v1.6.4 新增 SUSFS 优先级 UID 过滤（需 `CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER`，本树未开启，ksud 自动跳过不影响其余功能）、内核符号精确查找 bugfix、管理器界面刷新 |
 | `ak3-susfs-9` | FinaSU v1.6.3 + Tracepoint 后端稳定版（2026-11-16，基于 run59） |
 | `ak3-susfs-8` | **Inline 实验版（已回退）**：SUSFS Inline 后端 + preinit runner 运行时关闭；⚠️ 实测 `su` 失效（`su -c id` 仍 uid 2000），分析见 [docs/inline-su-issue.md](docs/inline-su-issue.md) |
 | `ak3-susfs-7` | FinaSU v1.6.1 + SUSFS **Tracepoint** 后端（2026-11-13，含 `FinaSU_v1.6.1_33198-release.apk` 管理器 + run43 内核） |
